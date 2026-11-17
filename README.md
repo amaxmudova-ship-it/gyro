@@ -4,7 +4,7 @@
 |---|---|
 | `lab9_gyro.qrs` | **TRIK Studio program for the real robot** (visual blocks). Runs the whole experiment and logs to `lab9_gyro_78.csv`. |
 | `lab9_gyro_quicktest.qrs` | The same program with short waits (3 s warm-up, 10 s static) to check that the robot turns. Logs to `lab9_quicktest.csv`. Not for the report. |
-| `Lab9_Gyroscope_parameters.ipynb` | Colab notebook: §1 offset + `calibrate_gyro()`, §2 drift and integrals, §3 range, §4 resolution, §5 noise, §6 scale factor and sign, Step 3 plots, `gyro_sim()`, parameter table, analysis draft. |
+| `Lab9_Gyroscope_parameters.ipynb` | Colab notebook: offset b0 + own calibrate_gyro(), drift d and heading integrals, measurement limits ±ω_max, noise σ, results table |
 
 ---
 
@@ -133,85 +133,59 @@ At an exact phase boundary (`tau` exactly 0, `T_sin` or `T_sin + T_rect`) `sgn` 
 
 ## 5. Notebook `Lab9_Gyroscope_parameters.ipynb`
 
-Open it in Colab and upload `lab9_gyro.csv` (the first cell asks for it). Set the configuration, then *Runtime → Run all*. Without a log it runs on a **synthetic demo log** and marks every result as demo data.
+Open it in Colab and upload `lab9_gyro_78.csv` (the first cell asks for it). Set the configuration, then *Runtime → Run all*.
+
+It does four things: **offset**, **drift + heading integrals**, **measurement limits**, **noise**.
 
 > **Units:** on the robot `t` and the `T_*` lengths are in **ms**. In the notebook `t` is in **s** and rates are in **deg/s** (`omega_z = gz_cal / 1000`).
 
-### Configuration (first cell)
+### Settings (first cell)
 
 | Variable | Default | Meaning |
 |---|---|---|
 | `LOG_PATH` | `"lab9_gyro.csv"` | robot log |
-| `r` | `0.042` | wheel radius, m (Lab 5; same name and value as `Gyro_demo.qrs`) |
-| `B` | `0.194` | wheel base, m (Lab 5; called *L* in the Lab 9 README, *B* in `Gyro_demo.qrs` and Lab 10) |
-| `ENC_UNITS_PER_REV` | `360.0` | encoder units per wheel revolution (360 = degrees) |
-| `SLIP_MARK_DEG` | `None` | tape-mark angle at the end, deg, CCW + |
-| `T_CAL_BASELINE` | `30.0` | §1 baseline window, s |
+| `T_CAL_BASELINE` | `30.0` | baseline window for `b0`, s |
 | `HEADING_TOL_DEG` | `1.0` | allowed heading error from a wrong `b0` after 3 min, deg (sets `T_cal_rec`) |
-| `TURN_RATE_AVG` | `20.0` | mean turn rate assumed in the error budget, deg/s |
+
 
 ### Data
 
 | Variable | Meaning | Unit |
 |---|---|---|
-| `log` | CSV exactly as read | — |
-| `df` | log after `prepare()`: adds the columns below | — |
-| `df.t` | time from `t_us` (from `t_ms` if the gyro timestamp is unusable) | s |
-| `df.omega_z` | `gz_cal / 1000`, measured rate ω_z | deg/s |
-| `df.phi_L`, `df.phi_R` | wheel angles φ_L, φ_R from `encL`, `encR` | rad |
-| `static`, `static_all` | static phase without / with repeated gyro samples | — |
-| `t_st`, `omega_st` | time and rate of the static phase | s, deg/s |
+| `log` | the CSV, repeated gyro samples removed, `phase` rounded down, plus `t` and `omega_z` | — |
+| `log.t` | time from `t_us` (from `t_ms` if the gyro timestamp is not increasing) | s |
+| `log.omega_z` | `gz_cal / 1000`, measured rate ω_z | deg/s |
+| `static` | rows with `phase == 0` | — |
+| `t_st`, `omega_st` | time from the start of the static phase, and its rate | s, deg/s |
 | `fs` | gyro sample rate | Hz |
-| `rot` | rotation run (sin, rect, rest), one row per gyro sample | — |
-| `rot.t_rot` | time since the rotation run started | s |
-| `rot.theta_enc` | θ_enc = (r/B)(φ_R − φ_L), from 0 | deg |
-| `rot.omega_enc` | dθ_enc/dt (Savitzky–Golay derivative) | deg/s |
-| `rot.theta_gyro` | θ_gyro = ∫(ω_z − b0) dt, from 0 | deg |
-| `rot.e` | e(t) = θ_gyro − θ_enc | deg |
-| `rot.A` | amplitude of the sample: 30, 60, 150 (0 in rest) | % |
+| `rot` | rows with `phase >= 1` (rotation run) | — |
 
 ### Results
 
 | Section | Variable | Meaning | Unit |
 |---|---|---|---|
-| §1 | `b0`, `b0_se` | mean of the first `T_CAL_BASELINE` s and its standard error | deg/s |
-| §1 | `b0_full` | mean of the whole 3-min static log | deg/s |
-| §1 | `T_cal_rec` | recommended calibration time (where b0(T) is flat) | s |
-| §1 | `b0_cal`, `cal_info` | result of `calibrate_gyro()` and its details (`T_cal`, `N`, `rejected`, `se`) | deg/s |
-| §2 | `d`, `d_se` | bias drift from the 30-s window means | deg/s per min |
-| §2 | `theta_raw` | heading from the raw rate, static log | deg |
-| §2 | `theta_b0`, `theta_cal` | heading after subtracting `b0` / `b0_cal` | deg |
-| §2 | `slope_raw` | uncorrected heading drift (compare with `b0·60`) | deg/min |
-| §3 | `omega_max_pos`, `omega_max_neg` | largest / smallest rate seen in the rotation run | deg/s |
-| §3 | `sat_hi`, `sat_lo` | `True` if a flat top (saturation) was seen | — |
-| §4 | `Delta` | resolution Δ, quantisation step | deg/s |
-| §5 | `sigma` | noise σ, static, `b0` and drift removed (R = σ² for Lab 12) | deg/s |
-| §5 | `sigma_b0` | σ with only `b0` removed | deg/s |
-| §5 | `ARW`, `BI` | angle random walk, bias instability (Allan deviation) | deg/√h, deg/s |
-| §6 | `GYRO_SIGN` | +1 if `gz_cal` is positive for a CCW turn | — |
-| §6 | `ENC_SIGN_R`, `ENC_SIGN_L` | +1 if the encoder counts in the direction of its motor command | — |
-| §6 | `raw2deg`, `raw2deg_method` | raw → deg/s factor and how it was found | deg/s per LSB |
-| §6 | `s_ccw`, `s_cw` | scale-factor error s, CCW / CW (unsaturated turns) | fraction (×100 = %) |
-| §6 | `s_fit` | all fits: `CCW`, `CW`, `CCW_nosat`, `CW_nosat` | fraction |
-| §6 | `segs` | one row per turn: `phase`, `A`, `dir`, `d_enc`, `d_gyro`, `peak_rate`, `sat` | — |
-| slip check | `theta_enc_end`, `fin_tab` | final angles in the rest phase | deg |
+| 1 Offset | `b0`, `b0_se` | mean of the first `T_CAL_BASELINE` s, standard error | deg/s |
+| 1 Offset | `b0_T`, `se_T` | b0(T) and its standard error for `T_grid` = 0.5 … 60 s | deg/s |
+| 1 Offset | `T_cal_rec` | recommended calibration time: from here b0(T) stays within ±`HEADING_TOL_DEG`/180 deg/s of b0(60 s) and 2·SE is below that | s |
+| 1 Offset | `b0_cal` | result of `calibrate_gyro()` | deg/s |
+| 2 Drift | `t_win`, `b_win` | centres and means of the 30-s windows | s, deg/s |
+| 2 Drift | `d` | bias drift, slope of the window means | deg/s per min |
+| 2 Integrals | `theta_raw` | integral of the raw rate (static log) | deg |
+| 2 Integrals | `theta_cal` | integral of `omega_st − b0_cal` | deg |
+| 2 Integrals | `slope_raw` | uncorrected heading drift (compare with `b0·60`) | deg/min |
+| 3 Limits | `omega_max_pos`, `omega_max_neg` | largest / smallest rate in the rotation run | deg/s |
+| 3 Limits | `n_pos`, `n_neg` | samples at exactly that value; ≥ 5 = flat top = saturated | — |
+| 4 Noise | `noise` | static rate with the line `b0 + d·t` removed | deg/s |
+| 4 Noise | `sigma` | noise standard deviation σ (R = σ² for Lab 12) | deg/s |
 
 ### Functions
 
 | Function | Does |
 |---|---|
-| `prepare(log)` | picks the time base and adds `t`, `omega_z`, `phi_L`, `phi_R` |
-| `calibrate_gyro(log, T_cal=None, k_mad=4.0, detrend=False)` | own offset calibration: first `T_cal` s of the static phase (default `max(10, T_cal_rec)`), spikes removed with a 4·MAD test, mean of the rest. Returns `(b0, info)` |
-| `gyro_sim(omega_true, t, p=PARAMS, seed=None)` | simulated gyro: `Q_Delta(sat[(1+s)·omega_true + b0 + d·t/60 + noise])`, with `s = s_ccw` for `omega_true ≥ 0` and `s_cw` otherwise; `omega_true` in deg/s, `t` in s |
-| `make_demo_log(seed)` | synthetic log with the robot's column names (demo only) |
+| `b0_window(T)` | mean and standard error of the first `T` s of the static log |
+| `calibrate_gyro(log, T_cal=None, k_mad=4.0)` | own offset calibration: first `T_cal` s of the static phase (default `max(10, T_cal_rec)`), removes readings further than 4·MAD from the median, returns the mean of the rest |
 
-### Output files
-
-| File | Content |
-|---|---|
-| `figs/00_raw_log.png` … `figs/08_gyro_sim.png` | all plots |
-| `lab9_parameters.csv` | the parameter table for the report |
-| `lab9_gyro_params.json` | `PARAMS` for Labs 10–12: `b0`, `d`, `sigma`, `Delta`, `omega_max_pos`, `omega_max_neg`, `s_ccw`, `s_cw`, `sign`, `fs` |
+The last cell shows a table with all results: `b0`, `b0_cal`, `T_cal_rec`, `d`, `slope_raw`, `theta_cal` after 3 min, `omega_max_pos` / `omega_max_neg`, `sigma`.
 
 ### README symbol → variable
 
@@ -220,19 +194,8 @@ Open it in Colab and upload `lab9_gyro.csv` (the first cell asks for it). Set th
 | ω_z | `gz_cal` (mdeg/s) | `omega_z` (deg/s) |
 | b0 | — | `b0`, `b0_cal` |
 | d | — | `d` |
+| θ (heading) | — | `theta_raw`, `theta_cal` |
 | ω_max | — | `omega_max_pos`, `omega_max_neg` |
-| Δ | — | `Delta` |
 | σ | — | `sigma` |
-| s | — | `s_ccw`, `s_cw` |
-| θ_gyro, θ_enc, e | — | `theta_gyro`, `theta_enc`, `e` |
-| φ_L, φ_R | `encL`, `encR` (deg) | `phi_L`, `phi_R` (rad) |
-| r, L | — | `r`, `B` |
-| u, A, T | `u`, `A_sin` / `A_rect`, `T` | `u`, `A`, — |
 
 ---
-
-## Notes
-
-* The scale factor `s` is measured against θ_enc = (r/B)(φ_R − φ_L). Any error in `r/B`, and any wheel slip, shows up directly in `s`. Use the tape-mark angle to judge which sensor is right.
-* If the gyro never saturates (no flat top in §3), `omega_max_pos` / `omega_max_neg` are only lower bounds. Spin the robot by hand on a turntable or office chair, log it, and re-run the §3 cell.
-* The `.qrs` cannot read `readRawData()`. Without `gz_raw` the notebook sets `raw2deg = Delta` (1 LSB = one quantisation step). Run `lab9_gyro.js` for the direct fit.
